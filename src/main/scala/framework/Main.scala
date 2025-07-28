@@ -6,7 +6,7 @@ class EffectScope extends ContinuationScope("EffectScope"):
   var value: Any = null   // The value to resume the continuation with
 
 // Effect traits are now a clean API. No implementation details.
-trait Log:
+trait Log1:
   def info(msg: String): Unit
 
 trait State[S]:
@@ -15,12 +15,12 @@ trait State[S]:
 
 
 object Runner:
-  def run[A](initialState: Int)(program: Log ?=> State[Int] ?=> A): A = {
+  def run[A](initialState: Int)(program: Log1 ?=> State[Int] ?=> A): A = {
     val scope = new EffectScope()
 
     // --- Handler Implementations ---
     // The handlers are now inner classes with access to the runner's state and scope.
-    class LogHandler extends Log:
+    class LogHandler extends Log1:
       def info(msg: String): Unit = {
         scope.op = LogHandler.Info(msg)
         Continuation.`yield`(scope)
@@ -75,8 +75,8 @@ object Runner:
 
 object MainApp:
   // The function signature now perfectly tracks the effects it uses.
-  def myProgram: Log ?=> State[Int] ?=> String = {
-    val L = summon[Log]
+  def myProgram: Log1 ?=> State[Int] ?=> String = {
+    val L = summon[Log1]
     val S = summon[State[Int]]
     L.info("Program starting")
     val initial = S.get()
