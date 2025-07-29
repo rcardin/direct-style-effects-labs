@@ -1,3 +1,5 @@
+package algeff
+
 // ============================================================================
 // Effect Capabilities using Context Functions + Shift/Reset
 // Based on Andrzej Filinski's "Representing Monads" (1994)
@@ -38,9 +40,9 @@ object ContextualDelimitedControl:
   private val metaCont = new ThreadLocal[Any => Any]:
     override def initialValue(): Any => Any = identity
 
-  private class ShiftEscape(val value: Any) extends ControlThrowable
+  class ShiftEscape(val value: Any) extends ControlThrowable
   
-  private object ShiftEscape:
+  object ShiftEscape:
     def unapply(e: ShiftEscape): Option[Any] = Some(e.value)
     def apply(value: Any): ShiftEscape = new ShiftEscape(value)
 
