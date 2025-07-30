@@ -8,7 +8,7 @@ import async.FiberHandle
 import java.util.concurrent.ScheduledExecutorService
 
 object AsyncSR {
- // ============================================================================
+// ============================================================================
 // Core Async Continuation Types
 // ============================================================================
 
@@ -99,7 +99,6 @@ object AsyncDelimitedControl:
             continuation = waitingContinuations.poll()
       
       // Execute the shift function asynchronously
-      import scala.concurrent.ExecutionContext.Implicits.global
       Future {
         try
           val computation = f(shiftContinuation)
@@ -111,7 +110,7 @@ object AsyncDelimitedControl:
           )
         catch
           case e: Exception => shiftContinuation.resumeWithException(e)
-      }
+      }(ExecutionContext.global)
   
   /**
    * Asynchronous reset - establishes delimited scope for async computations
@@ -250,6 +249,7 @@ trait AsyncAsync[R]:
   def delayAsync[A](ms: Int)(computation: => A): AsyncComputation[A]
   def forkAsync[A](computation: => AsyncComputation[A]): AsyncFiberHandle[A]
   def parallelAsync[A, B](fa: => AsyncComputation[A], fb: => AsyncComputation[B]): AsyncComputation[(A, B)]
+  def shutdown(): Unit
 
 /**
  * Implementation of async capabilities
@@ -257,6 +257,19 @@ trait AsyncAsync[R]:
 class AsyncAsyncImpl[R] extends AsyncAsync[R]:
   private val fiberCounter = AtomicLong(0)
   private val executor: ScheduledExecutorService = Executors.newScheduledThreadPool(4)
+  
+  /**
+   * Shutdown the async capability and clean up resources
+   */
+  def shutdown(): Unit =
+    executor.shutdown()
+    try
+      if !executor.awaitTermination(5, java.util.concurrent.TimeUnit.SECONDS) then
+        executor.shutdownNow()
+    catch
+      case _: InterruptedException =>
+        executor.shutdownNow()
+        Thread.currentThread().interrupt()
   
   def delayAsync[A](ms: Int)(computation: => A): AsyncComputation[A] =
     AsyncDelimitedControl.asyncShift[A, Unit] { continuation =>
@@ -282,8 +295,7 @@ class AsyncAsyncImpl[R] extends AsyncAsync[R]:
     val fiberId = fiberCounter.incrementAndGet()
     val fiber = new AsyncFiberHandle[A](fiberId)
     
-    // Import ExecutionContext for Future
-    import scala.concurrent.ExecutionContext.Implicits.global
+    // Execute the computation asynchronously
     Future {
       try
         val asyncComp = computation
@@ -293,7 +305,7 @@ class AsyncAsyncImpl[R] extends AsyncAsync[R]:
         )
       catch
         case e: Exception => fiber.complete(Failure(e))
-    }
+    }(ExecutionContext.global)
     
     fiber
   
@@ -361,8 +373,7 @@ object AsyncShiftResetExamples:
   /**
    * Example using truly async shift/reset for fiber coordination
    */
-  def asyncFiberProgram(): AsyncComputation[String] =
-    val asyncCapability = new AsyncAsyncImpl[Int]()
+  def asyncFiberProgram(asyncCapability: AsyncAsyncImpl[Int]): AsyncComputation[String] =
     import asyncCapability.*
     
     AsyncDelimitedControl.asyncReset { () =>
@@ -398,8 +409,7 @@ object AsyncShiftResetExamples:
   /**
    * Example demonstrating parallel async computation
    */
-  def asyncParallelProgram(): AsyncComputation[(Int, Int)] =
-    val asyncCapability = new AsyncAsyncImpl[Int]()
+  def asyncParallelProgram(asyncCapability: AsyncAsyncImpl[Int]): AsyncComputation[(Int, Int)] =
     import asyncCapability.*
     
     AsyncDelimitedControl.asyncReset { () =>
@@ -418,40 +428,53 @@ def testAsyncShiftReset(): Unit =
   
   println("=== Testing Async Shift/Reset Implementation ===")
   
-  println("\n--- Async Fiber Coordination ---")
-  val asyncProgram = asyncFiberProgram()
+  // Create a shared async capability that we'll clean up properly
+  val asyncCapability = new AsyncAsyncImpl[Int]()
   
-  // Convert to Future for easy testing
-  val promise = scala.concurrent.Promise[String]()
-  asyncProgram.onComplete(new AsyncContinuation[String]:
-    def resume(value: String): Unit = promise.success(value)
-    def resumeWithException(exception: Throwable): Unit = promise.failure(exception)
-  )
-  
-  import scala.concurrent.duration.*
-  val result = scala.concurrent.Await.result(promise.future, 5.seconds)
-  println(s"Async result: $result")
-  
-  println("\n--- Async Parallel Computation ---")
-  val parallelProgram = asyncParallelProgram()
-  
-  val parallelPromise = scala.concurrent.Promise[(Int, Int)]()
-  parallelProgram.onComplete(new AsyncContinuation[(Int, Int)]:
-    def resume(value: (Int, Int)): Unit = parallelPromise.success(value)
-    def resumeWithException(exception: Throwable): Unit = parallelPromise.failure(exception)
-  )
-  
-  val parallelResult = scala.concurrent.Await.result(parallelPromise.future, 5.seconds)
-  println(s"Parallel result: $parallelResult")
-  
-  println("\n=== Async Shift/Reset Benefits ===")
-  println("✅ TRUE asynchronous shift/reset operations")
-  println("✅ Continuations stored and resumed asynchronously")
-  println("✅ Non-blocking fiber coordination")
-  println("✅ Proper delimited control with async capabilities")
-  println("✅ Multiple async computations can be coordinated")
-  println("✅ Follows Filinski's theory with full async support")
-  println("✅ Foundation for building async effect systems")
+  try
+    println("\n--- Async Fiber Coordination ---")
+    val asyncProgram = asyncFiberProgram(asyncCapability)
+    
+    // Convert to Future for easy testing
+    val promise = scala.concurrent.Promise[String]()
+    asyncProgram.onComplete(new AsyncContinuation[String]:
+      def resume(value: String): Unit = promise.success(value)
+      def resumeWithException(exception: Throwable): Unit = promise.failure(exception)
+    )
+    
+    import scala.concurrent.duration.*
+    val result = scala.concurrent.Await.result(promise.future, 5.seconds)
+    println(s"Async result: $result")
+    
+    println("\n--- Async Parallel Computation ---")
+    val parallelProgram = asyncParallelProgram(asyncCapability)
+    
+    val parallelPromise = scala.concurrent.Promise[(Int, Int)]()
+    parallelProgram.onComplete(new AsyncContinuation[(Int, Int)]:
+      def resume(value: (Int, Int)): Unit = parallelPromise.success(value)
+      def resumeWithException(exception: Throwable): Unit = parallelPromise.failure(exception)
+    )
+    
+    val parallelResult = scala.concurrent.Await.result(parallelPromise.future, 5.seconds)
+    println(s"Parallel result: $parallelResult")
+    
+    println("\n=== Async Shift/Reset Benefits ===")
+    println("✅ TRUE asynchronous shift/reset operations")
+    println("✅ Continuations stored and resumed asynchronously")
+    println("✅ Non-blocking fiber coordination")
+    println("✅ Proper delimited control with async capabilities")
+    println("✅ Multiple async computations can be coordinated")
+    println("✅ Follows Filinski's theory with full async support")
+    println("✅ Foundation for building async effect systems")
+    
+    // Give a moment for any remaining async operations to complete
+    Thread.sleep(200)
+    
+  finally
+    // Always clean up resources
+    println("\n--- Cleaning up async resources ---")
+    asyncCapability.shutdown()
+    println("Async shift/reset test completed! 🎉")
 
 @main def testAsyncShiftResetMain(): Unit =
   testAsyncShiftReset()
