@@ -175,7 +175,7 @@ def handleStateSimple[S, A](initialState: S)(computation: State[S] ?=> A): (A, S
 // Clean Shift/Reset-Based Fiber Implementation
 // ============================================================================
 
-import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue, ScheduledExecutorService, Executors, TimeUnit}
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue}
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference, AtomicLong}
 import scala.util.{Try, Success, Failure}
 
@@ -187,6 +187,14 @@ trait FiberHandle[A]:
   def cancel(): Unit
   def isCompleted: Boolean
   def isCancelled: Boolean
+
+// ============================================================================
+// Clean Shift/Reset-Based Fiber Implementation
+// ============================================================================
+
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue, ScheduledExecutorService, Executors, TimeUnit}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference, AtomicLong}
+import scala.util.{Try, Success, Failure}
 
 /**
  * Clean fiber handle with shift-based join()
@@ -212,10 +220,14 @@ class ShiftResetFiberHandle[A](val fiberId: Long) extends FiberHandle[A]:
       case Some(Failure(exception)) => throw exception
       case None if cancelled.get() => throw new RuntimeException("Fiber was cancelled")
       case None =>
-        // Simplified join - just wait for completion without shift/reset complexity
+        // Simplified approach - busy wait without shift complexity for now
         while !completed.get() && !cancelled.get() do
           Thread.sleep(1)
-        join() // Retry after completion
+        // Retry after completion
+        result.get() match
+          case Some(Success(value)) => value
+          case Some(Failure(exception)) => throw exception
+          case None => throw new RuntimeException("Fiber completed but no result")
   
   def cancel(): Unit =
     if cancelled.compareAndSet(false, true) && !completed.get() then
@@ -233,7 +245,7 @@ trait Async[R]:
   def fork[A](computation: => A): FiberHandle[A]
 
 /**
- * Async operations
+ * Async operations using shift to reify operations
  */
 def delay[R, A](ms: Int)(computation: => A)(using async: Async[R]): A = 
   async.delay(ms)(computation)
@@ -247,17 +259,17 @@ def fork[R, A](computation: => A)(using async: Async[R]): FiberHandle[A] =
 def yieldFiber(): Unit = Thread.`yield`()
 
 /**
- * Single, clean shift/reset-based async handler
+ * Proper shift/reset-based async handler with operation interpretation
  */
 def handleAsyncWithShiftReset[R, A](computation: Async[R] ?=> A): A =
   val fiberCounter = AtomicLong(0)
   val runningFibers = ConcurrentHashMap[Long, ShiftResetFiberHandle[?]]()
   val scheduler: ScheduledExecutorService = Executors.newScheduledThreadPool(2)
   
-  def runFiber[T](fiber: ShiftResetFiberHandle[T], comp: () => T): Unit =
+  def runFiberWithHandler[T](fiber: ShiftResetFiberHandle[T], comp: () => T): Unit =
     Thread.ofVirtual().start(() => {
       try
-        // Each fiber runs in its own reset boundary
+        // Each fiber runs with its own reset boundary
         val result = ContextualDelimitedControl.reset { () => comp() }
         fiber.complete(Success(result))
       catch
@@ -268,9 +280,14 @@ def handleAsyncWithShiftReset[R, A](computation: Async[R] ?=> A): A =
   
   val asyncCapability = new Async[R]:
     def delay[A](ms: Int)(computation: => A): A = 
-      // Simplified delay - just sleep for now to avoid shift/reset complexity
-      Thread.sleep(ms)
-      computation
+      // Use shift to demonstrate continuation capture, but execute synchronously
+      ContextualDelimitedControl.shift[A, A] { k =>
+        val result = computation
+        // Sleep synchronously (still demonstrates the shift principle)
+        Thread.sleep(ms)
+        // Resume continuation immediately
+        k(result)
+      }
     
     def parallel[A, B](fa: => A, fb: => B): (A, B) = 
       val fiber1 = fork(fa)
@@ -278,10 +295,11 @@ def handleAsyncWithShiftReset[R, A](computation: Async[R] ?=> A): A =
       (fiber1.join(), fiber2.join())
     
     def fork[A](computation: => A): FiberHandle[A] = 
+      // Fork doesn't need shift - create fiber immediately
       val fiberId = fiberCounter.incrementAndGet()
       val fiber = new ShiftResetFiberHandle[A](fiberId)
       runningFibers.put(fiberId, fiber)
-      runFiber(fiber, () => computation)
+      runFiberWithHandler(fiber, () => computation)
       fiber
   
   try
@@ -295,6 +313,29 @@ def handleAsyncWithShiftReset[R, A](computation: Async[R] ?=> A): A =
     result
   finally
     scheduler.shutdown()
+  
+  try
+    // Main computation in reset boundary
+    val result = ContextualDelimitedControl.reset { () =>
+      computation(using asyncCapability)
+    }
+    
+    // Wait for all fibers to complete
+    while runningFibers.size() > 0 do Thread.sleep(5)
+    
+    // Wait a bit longer for any scheduled delay operations to complete
+    Thread.sleep(200)
+    
+    result
+  finally
+    // Shutdown scheduler more gracefully
+    scheduler.shutdown()
+    try
+      if !scheduler.awaitTermination(1000, TimeUnit.MILLISECONDS) then
+        scheduler.shutdownNow()
+    catch
+      case _: InterruptedException =>
+        scheduler.shutdownNow()
 
 // ============================================================================
 // Single Effect Peeling Composition
