@@ -175,8 +175,8 @@ def handleStateSimple[S, A](initialState: S)(computation: State[S] ?=> A): (A, S
 // Clean Shift/Reset-Based Fiber Implementation
 // ============================================================================
 
-import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue}
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference, AtomicLong}
+import java.util.concurrent.{ConcurrentHashMap, ConcurrentLinkedQueue, ScheduledExecutorService, Executors, TimeUnit, CountDownLatch}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference, AtomicLong, AtomicInteger}
 import scala.util.{Try, Success, Failure}
 
 /**
@@ -256,10 +256,10 @@ def parallel[R, A, B](fa: => A, fb: => B)(using async: Async[R]): (A, B) =
 def fork[R, A](computation: => A)(using async: Async[R]): FiberHandle[A] = 
   async.fork(computation)
 
-def yieldFiber(): Unit = Thread.`yield`()
+def yieldFiber(): Unit = Thread.`yield`() 
 
 /**
- * Proper shift/reset-based async handler with operation interpretation
+ * Proper shift/reset-based async handler with direct continuation handling
  */
 def handleAsyncWithShiftReset[R, A](computation: Async[R] ?=> A): A =
   val fiberCounter = AtomicLong(0)
